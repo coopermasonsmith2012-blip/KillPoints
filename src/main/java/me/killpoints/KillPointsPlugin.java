@@ -1,6 +1,8 @@
 package me.killpoints;
 
 import org.bukkit.*;
+import org.bukkit.configuration.file.FileConfiguration;
+import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandExecutor;
 import org.bukkit.command.CommandSender;
@@ -20,6 +22,8 @@ import org.bukkit.inventory.meta.SkullMeta;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scoreboard.*;
 
+import java.io.File;
+import java.io.IOException;
 import java.util.*;
 
 public class KillPointsPlugin extends JavaPlugin implements Listener, CommandExecutor {
@@ -33,8 +37,9 @@ public class KillPointsPlugin extends JavaPlugin implements Listener, CommandExe
 
     private final Map<UUID, TeamData> teamsByLeader = new HashMap<>();
     private final Map<UUID, UUID> playerToTeamLeader = new HashMap<>();
+    private File teamsFile;
+    private FileConfiguration teamsConfig;
 
-    // Inner class for Team storage
     private static class TeamData {
         String name;
         UUID leader;
@@ -54,23 +59,63 @@ public class KillPointsPlugin extends JavaPlugin implements Listener, CommandExe
         
         setupScoreboard();
         addSoulTotemRecipe();
+        loadTeams(); // Load saved data
+    }
+
+    @Override
+    public void onDisable() {
+        saveTeams(); // Save data on shutdown
     }
 
     private void setupScoreboard() {
         ScoreboardManager manager = Bukkit.getScoreboardManager();
         scoreboard = manager.getMainScoreboard();
-
         pointsObjective = scoreboard.getObjective("killpoints");
         if (pointsObjective == null) {
             pointsObjective = scoreboard.registerNewObjective("killpoints", Criteria.DUMMY, ChatColor.RED + "Kill Points");
             pointsObjective.setDisplaySlot(DisplaySlot.SIDEBAR);
         }
-
         deathsObjective = scoreboard.getObjective("deaths");
         if (deathsObjective == null) {
             deathsObjective = scoreboard.registerNewObjective("deaths", Criteria.DUMMY, ChatColor.GRAY + "Deaths");
             deathsObjective.setDisplaySlot(DisplaySlot.BELOW_NAME);
         }
+    }
+
+    private void loadTeams() {
+        teamsFile = new File(getDataFolder(), "teams.yml");
+        if (!teamsFile.exists()) return;
+        teamsConfig = YamlConfiguration.loadConfiguration(teamsFile);
+
+        if (teamsConfig.getConfigurationSection("teams") == null) return;
+
+        for (String leaderUUIDStr : teamsConfig.getConfigurationSection("teams").getKeys(false)) {
+            UUID leaderUUID = UUID.fromString(leaderUUIDStr);
+            String name = teamsConfig.getString("teams." + leaderUUIDStr + ".name");
+            List<String> memberList = teamsConfig.getStringList("teams." + leaderUUIDStr + ".members");
+
+            TeamData team = new TeamData(name, leaderUUID);
+            for (String m : memberList) {
+                UUID memberUUID = UUID.fromString(m);
+                team.members.add(memberUUID);
+                playerToTeamLeader.put(memberUUID, leaderUUID);
+            }
+            teamsByLeader.put(leaderUUID, team);
+        }
+    }
+
+    private void saveTeams() {
+        teamsFile = new File(getDataFolder(), "teams.yml");
+        teamsConfig = new YamlConfiguration();
+
+        for (Map.Entry<UUID, TeamData> entry : teamsByLeader.entrySet()) {
+            String path = "teams." + entry.getKey().toString();
+            teamsConfig.set(path + ".name", entry.getValue().name);
+            List<String> members = new ArrayList<>();
+            for (UUID m : entry.getValue().members) members.add(m.toString());
+            teamsConfig.set(path + ".members", members);
+        }
+        try { teamsConfig.save(teamsFile); } catch (IOException e) { e.printStackTrace(); }
     }
 
     @Override
@@ -79,18 +124,36 @@ public class KillPointsPlugin extends JavaPlugin implements Listener, CommandExe
         Player player = (Player) sender;
 
         if (args.length >= 2 && args[0].equalsIgnoreCase("create")) {
-            StringBuilder name = new StringBuilder();
-            for (int i = 1; i < args.length; i++) name.append(args[i]).append(" ");
-            
             if (playerToTeamLeader.containsKey(player.getUniqueId())) {
                 player.sendMessage(ChatColor.RED + "You are already in a team!");
-            } else {
-                String teamName = name.toString().trim();
-                TeamData newTeam = new TeamData(teamName, player.getUniqueId());
-                teamsByLeader.put(player.getUniqueId(), newTeam);
-                playerToTeamLeader.put(player.getUniqueId(), player.getUniqueId());
-                player.sendMessage(ChatColor.GREEN + "Team '" + teamName + "' created!");
+                return true;
             }
+            String teamName = String.join(" ", Arrays.copyOfRange(args, 1, args.length)).trim();
+            TeamData newTeam = new TeamData(teamName, player.getUniqueId());
+            teamsByLeader.put(player.getUniqueId(), newTeam);
+            playerToTeamLeader.put(player.getUniqueId(), player.getUniqueId());
+            player.sendMessage(ChatColor.GREEN + "Team '" + teamName + "' created!");
+            saveTeams();
+            return true;
+        }
+
+        if (args.length >= 2 && args[0].equalsIgnoreCase("add")) {
+            UUID leaderId = playerToTeamLeader.get(player.getUniqueId());
+            if (leaderId == null || !leaderId.equals(player.getUniqueId())) {
+                player.sendMessage(ChatColor.RED + "Only the leader can add members!");
+                return true;
+            }
+            Player target = Bukkit.getPlayer(args[1]);
+            if (target == null) {
+                player.sendMessage(ChatColor.RED + "Player offline.");
+                return true;
+            }
+            TeamData team = teamsByLeader.get(leaderId);
+            team.members.add(target.getUniqueId());
+            playerToTeamLeader.put(target.getUniqueId(), leaderId);
+            player.sendMessage(ChatColor.GREEN + "Added " + target.getName() + "!");
+            target.sendMessage(ChatColor.GREEN + "Joined team " + team.name);
+            saveTeams();
             return true;
         }
 
@@ -107,7 +170,7 @@ public class KillPointsPlugin extends JavaPlugin implements Listener, CommandExe
         } else {
             TeamData team = teamsByLeader.get(leaderId);
             inv.setItem(4, createGuiItem(Material.BEACON, ChatColor.GOLD + team.name, ChatColor.YELLOW + "Leader: " + Bukkit.getOfflinePlayer(team.leader).getName()));
-            inv.setItem(13, createGuiItem(Material.EMERALD, ChatColor.GREEN + "Add Member", ChatColor.GRAY + "Invite players to your team"));
+            inv.setItem(13, createGuiItem(Material.EMERALD, ChatColor.GREEN + "Add Member", ChatColor.GRAY + "Click for instructions"));
         }
         player.openInventory(inv);
     }
@@ -126,29 +189,41 @@ public class KillPointsPlugin extends JavaPlugin implements Listener, CommandExe
         }
 
         if (totemStack != null) {
-            event.setKeepInventory(true);
-            event.getDrops().clear();
-            event.setKeepLevel(true);
+            protect(event, victim, ChatColor.LIGHT_PURPLE + "Soul Totem used!");
             totemStack.setAmount(totemStack.getAmount() - 1);
-            victim.sendMessage(ChatColor.LIGHT_PURPLE + "Soul Totem saved you!");
         } 
         else if (killer != null && areTeammates(killer, victim)) {
-            event.setKeepInventory(true);
-            event.getDrops().clear();
-            event.setKeepLevel(true);
-            victim.sendMessage(ChatColor.AQUA + "Teammate protection!");
+            protect(event, victim, ChatColor.AQUA + "Teammate protection!");
         } 
-        else {
-            // Natural death or PvP death (No Totem/Team)
-            if (killer == null) {
-                event.setKeepInventory(true);
-                event.getDrops().clear();
-            } else {
-                dropSingleTrophy(victim);
-            }
-            // Increment Death Counter
+        else if (killer == null) {
+            protect(event, victim, ChatColor.GREEN + "Natural death protection!");
             Score s = deathsObjective.getScore(victim.getName());
             s.setScore(s.getScore() + 1);
+        } else {
+            dropSingleTrophy(victim);
+            Score s = deathsObjective.getScore(victim.getName());
+            s.setScore(s.getScore() + 1);
+        }
+    }
+
+    private void protect(PlayerDeathEvent event, Player p, String msg) {
+        event.setKeepInventory(true);
+        event.getDrops().clear();
+        event.setKeepLevel(true); // FIX: Keep XP
+        event.setDroppedExp(0);
+        p.sendMessage(msg);
+    }
+
+    @EventHandler
+    public void onMenuClick(InventoryClickEvent event) {
+        if (!event.getView().getTitle().equals(MENU_TITLE)) return;
+        event.setCancelled(true);
+        if (event.getCurrentItem() == null) return;
+        
+        Player p = (Player) event.getWhoClicked();
+        if (event.getCurrentItem().getType() == Material.EMERALD) {
+            p.closeInventory();
+            p.sendMessage(ChatColor.YELLOW + "To add someone, use: " + ChatColor.WHITE + "/team add <name>");
         }
     }
 
@@ -179,7 +254,7 @@ public class KillPointsPlugin extends JavaPlugin implements Listener, CommandExe
         ItemMeta meta = soulTotem.getItemMeta();
         if (meta != null) {
             meta.setDisplayName(TOTEM_NAME);
-            meta.setLore(Collections.singletonList(ChatColor.DARK_PURPLE + "Stackable Protection"));
+            meta.setLore(Collections.singletonList(ChatColor.DARK_PURPLE + "Protection"));
             soulTotem.setItemMeta(meta);
         }
         ShapedRecipe recipe = new ShapedRecipe(new NamespacedKey(this, "soul_totem"), soulTotem);
@@ -188,11 +263,6 @@ public class KillPointsPlugin extends JavaPlugin implements Listener, CommandExe
         recipe.setIngredient('E', Material.EMERALD_BLOCK);
         recipe.setIngredient('T', Material.TOTEM_OF_UNDYING);
         Bukkit.addRecipe(recipe);
-    }
-
-    @EventHandler
-    public void onMenuClick(InventoryClickEvent event) {
-        if (event.getView().getTitle().equals(MENU_TITLE)) event.setCancelled(true);
     }
 
     @EventHandler
