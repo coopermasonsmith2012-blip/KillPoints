@@ -1,6 +1,9 @@
 name: KillPoints
 version: 1.0
 main: me.killpoints.KillPointsPlugin
-api-version: 1.21
-description: A plugin that rewards player heads with scoreboard points.
-author: ShArKfLaW_97
+api-version: '1.21'
+author: Gemini
+commands:
+  team:
+    description: Opens the team management menu.
+    usage: /team
