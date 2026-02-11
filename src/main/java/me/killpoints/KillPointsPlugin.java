@@ -34,6 +34,7 @@ public class KillPointsPlugin extends JavaPlugin implements Listener, CommandExe
     
     private final String TOTEM_NAME = ChatColor.AQUA + "" + ChatColor.BOLD + "Soul Totem";
     private final String MENU_TITLE = ChatColor.BLACK + "Team Management";
+    private final String KICK_MENU_TITLE = ChatColor.RED + "Kick Members";
 
     private final Map<UUID, TeamData> teamsByLeader = new HashMap<>();
     private final Map<UUID, UUID> playerToTeamLeader = new HashMap<>();
@@ -55,16 +56,16 @@ public class KillPointsPlugin extends JavaPlugin implements Listener, CommandExe
     @Override
     public void onEnable() {
         Bukkit.getPluginManager().registerEvents(this, this);
-        getCommand("team").setExecutor(this);
+        if (getCommand("team") != null) getCommand("team").setExecutor(this);
         
         setupScoreboard();
         addSoulTotemRecipe();
-        loadTeams(); // Load saved data
+        loadTeams();
     }
 
     @Override
     public void onDisable() {
-        saveTeams(); // Save data on shutdown
+        saveTeams();
     }
 
     private void setupScoreboard() {
@@ -86,7 +87,6 @@ public class KillPointsPlugin extends JavaPlugin implements Listener, CommandExe
         teamsFile = new File(getDataFolder(), "teams.yml");
         if (!teamsFile.exists()) return;
         teamsConfig = YamlConfiguration.loadConfiguration(teamsFile);
-
         if (teamsConfig.getConfigurationSection("teams") == null) return;
 
         for (String leaderUUIDStr : teamsConfig.getConfigurationSection("teams").getKeys(false)) {
@@ -107,7 +107,6 @@ public class KillPointsPlugin extends JavaPlugin implements Listener, CommandExe
     private void saveTeams() {
         teamsFile = new File(getDataFolder(), "teams.yml");
         teamsConfig = new YamlConfiguration();
-
         for (Map.Entry<UUID, TeamData> entry : teamsByLeader.entrySet()) {
             String path = "teams." + entry.getKey().toString();
             teamsConfig.set(path + ".name", entry.getValue().name);
@@ -169,10 +168,76 @@ public class KillPointsPlugin extends JavaPlugin implements Listener, CommandExe
             inv.setItem(13, createGuiItem(Material.PAPER, ChatColor.AQUA + "Create a Team", ChatColor.GRAY + "/team create <name>"));
         } else {
             TeamData team = teamsByLeader.get(leaderId);
+            boolean isLeader = team.leader.equals(player.getUniqueId());
+            
             inv.setItem(4, createGuiItem(Material.BEACON, ChatColor.GOLD + team.name, ChatColor.YELLOW + "Leader: " + Bukkit.getOfflinePlayer(team.leader).getName()));
-            inv.setItem(13, createGuiItem(Material.EMERALD, ChatColor.GREEN + "Add Member", ChatColor.GRAY + "Click for instructions"));
+            inv.setItem(11, createGuiItem(Material.EMERALD, ChatColor.GREEN + "Add Member", ChatColor.GRAY + "/team add <name>"));
+            
+            if (isLeader) {
+                inv.setItem(15, createGuiItem(Material.BARRIER, ChatColor.RED + "Kick Member", ChatColor.GRAY + "Manage and remove members"));
+            }
         }
         player.openInventory(inv);
+    }
+
+    private void openKickMenu(Player player) {
+        TeamData team = teamsByLeader.get(player.getUniqueId());
+        Inventory inv = Bukkit.createInventory(null, 27, KICK_MENU_TITLE);
+
+        for (UUID memberId : team.members) {
+            if (memberId.equals(player.getUniqueId())) continue; // Can't kick yourself
+            
+            ItemStack head = new ItemStack(Material.PLAYER_HEAD);
+            SkullMeta meta = (SkullMeta) head.getItemMeta();
+            if (meta != null) {
+                OfflinePlayer op = Bukkit.getOfflinePlayer(memberId);
+                meta.setOwningPlayer(op);
+                meta.setDisplayName(ChatColor.YELLOW + op.getName());
+                meta.setLore(Collections.singletonList(ChatColor.RED + "Click to kick"));
+                head.setItemMeta(meta);
+            }
+            inv.addItem(head);
+        }
+        player.openInventory(inv);
+    }
+
+    @EventHandler
+    public void onMenuClick(InventoryClickEvent event) {
+        String title = event.getView().getTitle();
+        if (!title.equals(MENU_TITLE) && !title.equals(KICK_MENU_TITLE)) return;
+        event.setCancelled(true);
+        
+        Player p = (Player) event.getWhoClicked();
+        ItemStack clicked = event.getCurrentItem();
+        if (clicked == null) return;
+
+        if (title.equals(MENU_TITLE)) {
+            if (clicked.getType() == Material.EMERALD) {
+                p.closeInventory();
+                p.sendMessage(ChatColor.YELLOW + "Use: " + ChatColor.WHITE + "/team add <name>");
+            } else if (clicked.getType() == Material.BARRIER) {
+                openKickMenu(p);
+            }
+        } 
+        else if (title.equals(KICK_MENU_TITLE)) {
+            if (clicked.getType() == Material.PLAYER_HEAD) {
+                SkullMeta meta = (SkullMeta) clicked.getItemMeta();
+                if (meta != null && meta.getOwningPlayer() != null) {
+                    UUID targetId = meta.getOwningPlayer().getUniqueId();
+                    TeamData team = teamsByLeader.get(p.getUniqueId());
+                    
+                    team.members.remove(targetId);
+                    playerToTeamLeader.remove(targetId);
+                    p.sendMessage(ChatColor.RED + "Kicked " + meta.getOwningPlayer().getName());
+                    
+                    Player targetPlayer = Bukkit.getPlayer(targetId);
+                    if (targetPlayer != null) targetPlayer.sendMessage(ChatColor.RED + "You were kicked from the team.");
+                    
+                    saveTeams();
+                    openKickMenu(p); // Refresh menu
+                }
+            }
+        }
     }
 
     @EventHandler(priority = EventPriority.HIGHEST)
@@ -197,34 +262,24 @@ public class KillPointsPlugin extends JavaPlugin implements Listener, CommandExe
         } 
         else if (killer == null) {
             protect(event, victim, ChatColor.GREEN + "Natural death protection!");
-            Score s = deathsObjective.getScore(victim.getName());
-            s.setScore(s.getScore() + 1);
+            incrementDeath(victim);
         } else {
             dropSingleTrophy(victim);
-            Score s = deathsObjective.getScore(victim.getName());
-            s.setScore(s.getScore() + 1);
+            incrementDeath(victim);
         }
     }
 
     private void protect(PlayerDeathEvent event, Player p, String msg) {
         event.setKeepInventory(true);
         event.getDrops().clear();
-        event.setKeepLevel(true); // FIX: Keep XP
+        event.setKeepLevel(true);
         event.setDroppedExp(0);
         p.sendMessage(msg);
     }
 
-    @EventHandler
-    public void onMenuClick(InventoryClickEvent event) {
-        if (!event.getView().getTitle().equals(MENU_TITLE)) return;
-        event.setCancelled(true);
-        if (event.getCurrentItem() == null) return;
-        
-        Player p = (Player) event.getWhoClicked();
-        if (event.getCurrentItem().getType() == Material.EMERALD) {
-            p.closeInventory();
-            p.sendMessage(ChatColor.YELLOW + "To add someone, use: " + ChatColor.WHITE + "/team add <name>");
-        }
+    private void incrementDeath(Player p) {
+        Score s = deathsObjective.getScore(p.getName());
+        s.setScore(s.getScore() + 1);
     }
 
     private boolean areTeammates(Player p1, Player p2) {
